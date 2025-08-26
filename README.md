@@ -14,8 +14,8 @@ This GUI-based software is designed to work with a low-cost USB Potentiostat/Gal
 ## Installation
 
 ```bash
-git clone https://github.com/ajhbell/potentiostatcontroller_repo.git
-cd potentiostatcontroller_repo
+git clone https://github.com/ajhbell/potentiostat_controller.git
+cd potentiostat_controller
 pip install -r requirements.txt
 ```
 
