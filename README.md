@@ -24,7 +24,7 @@ pip install -r requirements.txt
 To launch the program (requires USB access), run:
 
 ```bash
-sudo python potentiostat_controller_v1.0.py
+sudo python potentiostat_controller_v1.py
 ```
 
 > The program must be run with `sudo` to interface with the USB-connected potentiostat hardware.
