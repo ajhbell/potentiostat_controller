@@ -3,7 +3,7 @@
 
 # This Python program allows control over the USB potentiostat/galvanostat using a graphical user interface. It supports real-time data acquisition and plotting, manual control and
 # calibration, and three pre-programmed measurement methods geared towards battery research (staircase cyclic voltammetry, constant-current charge/discharge, and rate testing).
-# It is cross-platform, requiring a working installation of Python 3.x together with the PyUSB, Scipy, Numpy, PyQt5, PyQtGraph, and Matplotlib packages.
+# It is cross-platform, requiring a working installation of Python >=3.10 together with the PyUSB, Numpy, SciPy, PySide6, PyQtGraph, and Matplotlib packages.
 # Adapted from code originally written by Thomas Dobbelaere.
 
 # Author: Alexander Bell
@@ -12,8 +12,7 @@
 import sys
 import platform
 import pyqtgraph
-from pyqtgraph.Qt import QtCore, QtGui
-from PyQt5 import QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 import time
 import datetime
 import timeit
@@ -73,6 +72,8 @@ time_of_last_adcread = 0.
 adcread_interval = 0.09  # ADC sampling interval (in seconds)
 logging_enabled = False  # Enable logging of potential and current in idle mode (can be adjusted in the GUI)
 legend_in_use = None  # Store legend currently in use
+legend = None  # Store legend
+
 
 """USER-DEFINED SOFTWARE SETTINGS"""
 
@@ -85,6 +86,7 @@ global_software_settings = {
 	'gcd_nth_cycles': 100,  # GCD experiments store every nth cycle for plotting
 	'tab_frame_width': 125,  # Tab frame width (in spaces)
 }
+
 
 """CV GLOBALS"""
 
@@ -234,6 +236,9 @@ class States:
 	Measuring_Rate_OCP_eq = 25
 	Measuring_Rate_Delay = 26
 
+
+state = States.NotConnected  # Initial state
+
 class Legends:
 	"""Manages plot legend across experiment types and previews."""
 	legends = {
@@ -262,10 +267,11 @@ class Legends:
 				except AttributeError:
 					pass  # Legend might have already been removed
 
-
-state = States.NotConnected  # Initial state
-
-legend = None  # Initial legend
+def add_legend_item(legend, curve, name, fontsize="12pt"):
+	"""Add a curve to a LegendItem."""
+	legend.addItem(curve, name)
+	label_item = legend.items[-1][1]
+	label_item.setText(name, size=fontsize)
 
 def current_to_string(currentrange, current_in_mA):
 	"""Format the measured current into a string with appropriate units and number of significant digits."""
@@ -338,48 +344,41 @@ def add_my_tab(tab_frame, tab_name):
 
 def format_box_for_display(box):
 	"""Adjust the appearance of a groupbox border for the status display."""
-	color = box.palette().color(QtGui.QPalette.Background)  # Get the background color
-	r, g, b = int(0.9*color.red()), int(0.9*color.green()), int(0.9*color.blue())  # Make background 10% darker to make the border color
 	box.setStyleSheet("""
 		QGroupBox {
-			border: 1px solid rgb(%d,%d,%d);
+			border: 1px solid #d3d3d3;
 			border-radius: 4px;
 			margin-top: 0.5em;
 			font-weight: normal;
-			color: gray;
 		}
 		GroupBox::title {
-			subcontrol-origin:
-			margin; left: 10px;
-			padding: 0 3px 0 3px;
+			subcontrol-origin: margin;
+			left: 10px;
+			padding: 0 3px;
 		}
-	""" % (r, g, b))
+	""")
 
 def format_box_for_parameter(box):
 	"""Adjust the appearance of a groupbox border for parameter input."""
-	color = box.palette().color(QtGui.QPalette.Background)  # Get the background color
-	r, g, b = int(0.7*color.red()), int(0.7*color.green()), int(0.7*color.blue())  # Make background 30% darker to make the border color
 	box.setStyleSheet("""
 		QGroupBox {
-			border: 1px solid rgb(%d,%d,%d);
+			border: 1px solid #d3d3d3;
 			border-radius: 4px;
 			margin-top: 0.5em;
-			font-weight: bold
+			font-weight: bold;
 		}
 		QGroupBox::title {
 			subcontrol-origin: margin;
 			left: 10px;
-			padding: 0 3px 0 3px;
+			padding: 0 3px;
 		}
-	""" % (r, g, b))
+	""")
 
 def format_box_for_parameter_centered_title(box):
 	"""Adjust the appearance of a groupbox border for parameter input."""
-	color = box.palette().color(QtGui.QPalette.Background)  # Get the background color
-	r, g, b = int(0.7*color.red()), int(0.7*color.green()), int(0.7*color.blue())  # Make background 30% darker to make the border color
 	box.setStyleSheet("""
 		QGroupBox {
-			border: 1px solid rgb(%d,%d,%d);
+			border: 1px solid #d3d3d3;
 			border-radius: 4px;
 			margin-top: 0.5em;
 			font-weight: bold;
@@ -389,7 +388,7 @@ def format_box_for_parameter_centered_title(box):
 			subcontrol-position: top center;
 			padding: 0 3px;
 		}
-	""" % (r, g, b))
+	""")
 
 def make_label_entry(parent, labelname):
 	"""Make a labelled input field for parameter input."""
@@ -411,6 +410,17 @@ def log_message(message):
 	"""Log a string to the message log."""
 	statustext.appendPlainText(datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ") + message)
 	statustext.ensureCursorVisible()
+
+def safe_usb_string(dev, attr_name):
+	"""Safely read a USB string descriptor, return fallback if not accessible."""
+	try:
+		return getattr(dev, attr_name)
+	except usb.core.USBError as e:
+		log_message(f"USBError reading {attr_name}: {e}")
+		return "Unknown"
+	except ValueError as e:
+		log_message(f"ValueError reading {attr_name}: {e}")
+		return "Unknown"
 
 def connect_disconnect_usb():
 	"""Toggle the USB device between connected and disconnected states."""
@@ -437,12 +447,25 @@ def connect_disconnect_usb():
 	else:
 		hardware_usb_connectButton.setText("Disconnect")
 		log_message("USB Interface connected.")
+
+		# Read descriptors safely
+		manufacturer = safe_usb_string(dev, "manufacturer")
+		product = safe_usb_string(dev, "product")
+		serial_number = safe_usb_string(dev, "serial_number")
+		hardware_device_info_text.setText(
+			f"Manufacturer: {manufacturer}\nProduct: {product}\nSerial #: {serial_number}"
+		)
+
+		# Warn the user if USB device descriptors cannot be read (permissions issue)
+		if "Unknown" in (manufacturer, product, serial_number):
+			QtWidgets.QMessageBox.warning(
+				mainwidget,
+				"USB Device Warning",
+				"USB device found but cannot read manufacturer/product/serial number.\n\n"
+				"If the potential/current is not displayed in the plot window, you may need to run as sudo or create a udev rule for your user (please see installation instructions in the GitHub repository)."
+			)
+
 		try:
-			hardware_device_info_text.setText("Manufacturer: %s\nProduct: %s\nSerial #: %s" % (
-				dev.manufacturer,
-				dev.product,
-				dev.serial_number
-			))
 			get_calibration()
 			set_cell_status(False)  # Cell off
 			set_control_mode(False)  # Potentiostatic control
@@ -450,6 +473,21 @@ def connect_disconnect_usb():
 			state = States.Idle_Init  # Start idle mode
 		except ValueError:
 			pass  # In case the device is not yet calibrated
+		except usb.core.USBError as e:
+			log_message(f"USB communication error: {e}")
+			if e.errno == 13:  # Access denied
+				QtWidgets.QMessageBox.critical(
+					mainwidget,
+					"USB Access Denied",
+					"Permission denied when communicating with the USB device.\n\n"
+					"Run the program with sudo or create a udev rule to grant access (please see installation instructions in the GitHub repository)."
+				)
+			else:
+				QtWidgets.QMessageBox.critical(
+					mainwidget,
+					"USB Communication Error",
+					f"An unexpected USB error occurred:\n\n{e}"
+				)
 
 		# Reset check states if checked as the measured cell potential and current will have changed
 		checkstate_reset(mode="USB_connected")
@@ -659,37 +697,55 @@ def offset_changed_callback():
 	global potential_offset, current_offset
 	try:
 		potential_offset = int(hardware_calibration_potential_offset.text())
-		hardware_calibration_potential_offset.setStyleSheet("")
+		hardware_calibration_potential_offset.setProperty("invalid", False)
+		hardware_calibration_potential_offset.style().unpolish(hardware_calibration_potential_offset)
+		hardware_calibration_potential_offset.style().polish(hardware_calibration_potential_offset)
 	except ValueError:  # If the input field cannot be interpreted as a number, color it red
-		hardware_calibration_potential_offset.setStyleSheet("QLineEdit { background: red; }")
+		hardware_calibration_potential_offset.setProperty("invalid", True)
+		hardware_calibration_potential_offset.style().unpolish(hardware_calibration_potential_offset)
+		hardware_calibration_potential_offset.style().polish(hardware_calibration_potential_offset)
 	try:
 		current_offset = int(hardware_calibration_current_offset.text())
-		hardware_calibration_current_offset.setStyleSheet("")
+		hardware_calibration_current_offset.setProperty("invalid", False)
+		hardware_calibration_current_offset.style().unpolish(hardware_calibration_current_offset)
+		hardware_calibration_current_offset.style().polish(hardware_calibration_current_offset)
 	except ValueError:  # If the input field cannot be interpreted as a number, color it red
-		hardware_calibration_current_offset.setStyleSheet("QLineEdit { background: red; }")
+		hardware_calibration_current_offset.setProperty("invalid", True)
+		hardware_calibration_current_offset.style().unpolish(hardware_calibration_current_offset)
+		hardware_calibration_current_offset.style().polish(hardware_calibration_current_offset)
 
 def shunt_calibration_changed_callback():
 	"""Set the shunt calibration values from the input fields."""
 	for i in range(0, 3):
 		try:
 			shunt_calibration[i] = float(hardware_calibration_shuntvalues[i].text())
-			hardware_calibration_shuntvalues[i].setStyleSheet("")
+			hardware_calibration_shuntvalues[i].setProperty("invalid", False)
 		except ValueError:  # If the input field cannot be interpreted as a number, color it red
-			hardware_calibration_shuntvalues[i].setStyleSheet("QLineEdit { background: red; }")
+			hardware_calibration_shuntvalues[i].setProperty("invalid", True)
+		hardware_calibration_shuntvalues[i].style().unpolish(hardware_calibration_shuntvalues[i])
+		hardware_calibration_shuntvalues[i].style().unpolish(hardware_calibration_shuntvalues[i])
 
 def set_dac_calibration():
 	"""Save DAC calibration values to the DAC and the device's flash memory."""
 	try:
 		dac_offset = int(hardware_calibration_dac_offset.text())
-		hardware_calibration_dac_offset.setStyleSheet("")
+		hardware_calibration_dac_offset.setProperty("invalid", False)
+		hardware_calibration_dac_offset.style().unpolish(hardware_calibration_dac_offset)
+		hardware_calibration_dac_offset.style().polish(hardware_calibration_dac_offset)
 	except ValueError:  # If the input field cannot be interpreted as a number, color it red
-		hardware_calibration_dac_offset.setStyleSheet("QLineEdit { background: red; }")
+		hardware_calibration_dac_offset.setProperty("invalid", True)
+		hardware_calibration_dac_offset.style().unpolish(hardware_calibration_dac_offset)
+		hardware_calibration_dac_offset.style().polish(hardware_calibration_dac_offset)
 		return
 	try:
 		dac_gain = int(hardware_calibration_dac_gain.text())
-		hardware_calibration_dac_gain.setStyleSheet("")
+		hardware_calibration_dac_gain.setProperty("invalid", False)
+		hardware_calibration_dac_gain.style().unpolish(hardware_calibration_dac_gain)
+		hardware_calibration_dac_gain.style().polish(hardware_calibration_dac_gain)
 	except ValueError:  # If the input field cannot be interpreted as a number, color it red
-		hardware_calibration_dac_gain.setStyleSheet("QLineEdit { background: red; }")
+		hardware_calibration_dac_gain.setProperty("invalid", True)
+		hardware_calibration_dac_gain.style().unpolish(hardware_calibration_dac_gain)
+		hardware_calibration_dac_gain.style().polish(hardware_calibration_dac_gain)
 		return
 	send_command(b'DACCALSET '+decimal_to_dac_bytes(dac_offset)+decimal_to_dac_bytes(dac_gain-2**19), b'OK', "DAC calibration saved to flash memory.")
 
@@ -728,7 +784,6 @@ def dac_calibrate():
 
 def set_output(value_units_index, value):
 	"""Output data to the DAC; units can be either V (index 0), mA (index 1), or raw counts (index 2)."""
-	global last_potentiostatic_command, last_galvanostatic_command
 	if value_units_index == 0:
 		send_command(b'DACSET '+decimal_to_dac_bytes(value/8.*2.**19+int(round(potential_offset/4.))), b'OK')
 	elif value_units_index == 1:
@@ -786,6 +841,9 @@ def wait_for_adcread():
 def read_potential_current():
 	"""Read the most recent potential and current values from the device's ADC."""
 	global potential, current, raw_potential, raw_current, time_of_last_adcread
+	if dev is None:
+		log_message("Attempted to read USB data, but no device is connected.")
+		return
 	wait_for_adcread()
 	time_of_last_adcread = timeit.default_timer()
 	dev.write(0x01, b'ADCREAD')  # 0x01 = write address of EP1
@@ -799,7 +857,7 @@ def read_potential_current():
 		current_monitor.setText(current_to_string(currentrange, current))
 		if logging_enabled:  # If enabled, all measurements are appended to an output file (even in idle mode)
 			try:
-				print("%.2f\t%e\t%e" % (time_of_last_adcread, potential, current*1e-3), file=open(hardware_log_filename.text(), 'a', 1))  # Output tab-separated data containing time (in s), potential (in V), and current (in A)
+				print("%.2f\t%e\t%e" % (time_of_last_adcread, potential, current*1e-3), file =open(hardware_log_filename.text(), 'a', 1))  # Output tab-separated data containing time (in s), potential (in V), and current (in A)
 			except:
 				QtWidgets.QMessageBox.critical(mainwidget, "Logging error!", "Logging error!")
 				hardware_log_checkbox.setChecked(False)  # Disable logging in case of file errors
@@ -818,9 +876,9 @@ def idle_init():
 	plot_frame.getAxis('bottom').setTicks(None)
 	plot_frame.setXRange(0, 200, update=True)
 	potential_plot_curve = plot_frame.plot(pen='g', name='Potential (V)')
-	legend.addItem(potential_plot_curve, "Potential (V)")
+	add_legend_item(legend, potential_plot_curve, "Potential (V)")
 	current_plot_curve = plot_frame.plot(pen='r', name='Current (mA)')
-	legend.addItem(current_plot_curve, "Current (mA)")
+	add_legend_item(legend, current_plot_curve, "Current (mA)")
 
 	# Update the active legend in the Legends dictionary
 	Legends.legends['live_graph'] = legend
@@ -840,7 +898,12 @@ def update_live_graph():
 
 def choose_file(file_entry_field, questionstring):
 	"""Open a file dialog and write the path of the selected file to a given entry field."""
-	file_path, _ = QtWidgets.QFileDialog.getSaveFileName(mainwidget, questionstring, "", "ASCII data (*.txt)",options=QtWidgets.QFileDialog.DontConfirmOverwrite)
+	file_path, _ = QtWidgets.QFileDialog.getSaveFileName(mainwidget, questionstring, "", "ASCII data (*.txt)", options=QtWidgets.QFileDialog.DontConfirmOverwrite)
+	file_entry_field.setText(file_path)
+
+def choose_plot_data_file(file_entry_field, questionstring):
+	"""Open a file dialog and write the path of the selected file to a given entry field."""
+	file_path, _ = QtWidgets.QFileDialog.getOpenFileName(mainwidget, questionstring, "", "ASCII data (*.txt)")
 	file_entry_field.setText(file_path)
 
 def toggle_logging(checkbox_state):
@@ -911,7 +974,7 @@ def cv_checkbutton_callback():
 	# Initialise with parameters_checked = False, filenames_checked = False, and a check button style reset
 	cv_parameters_checked = False
 	cv_filenames_checked = False
-	cv_variables_checkbutton.setStyleSheet("")
+	cv_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	cv_info_program_state_entry.setText("No experiments running")
@@ -948,7 +1011,7 @@ def cv_checkbutton_callback():
 	cv_parameters_checked = True
 
 	# Make check button green
-	cv_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	cv_variables_checkbutton.mark_valid()
 
 	# Calculate the time this experiment will take if init_OCP_valid
 	if not cv_parameters['OCP_bool'] or (cv_parameters['OCP_bool'] and cv_parameters['future_OCP_valid_bool']):
@@ -2287,7 +2350,7 @@ def cv_reset_experiment_controller(mode):
 			# Reset globals
 			cv_parameters_checked = False
 			cv_filenames_checked = False
-			cv_variables_checkbutton.setStyleSheet("")
+			cv_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			cv_total_time = None
@@ -2320,7 +2383,7 @@ def cv_reset_experiment_controller(mode):
 	# Reset globals
 	cv_parameters_checked = False
 	cv_filenames_checked = False
-	cv_variables_checkbutton.setStyleSheet("")
+	cv_variables_checkbutton.clear_valid()
 	cv_parameters = {'type': 'cv'}
 	cv_data = {}
 	cv_current_exp_index = None
@@ -2750,7 +2813,7 @@ def cv_update_plot(experiment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Cyclic voltammetry experiments:")
+	add_legend_item(legend, dummy_item, "Cyclic voltammetry experiments:")
 
 	# Cache current experiment parameters
 	lbound = cv_parameters['lbound'][experiment_index]
@@ -2759,7 +2822,7 @@ def cv_update_plot(experiment_index):
 	current_scanrate = cv_parameters['scanrate_mV/s'][experiment_index]
 
 	# Add current cycle to the top of the legend
-	legend.addItem(cv_plot_curve, f"Current experiment: {current_potential_window} V; {current_scanrate} mV/s")
+	add_legend_item(legend, cv_plot_curve, f"Current experiment: {current_potential_window} V; {current_scanrate} mV/s")
 
 	# Plot previous cycles from this experiment
 	if cv_plot_options_prev_cycles_checkbox.isChecked():
@@ -2789,7 +2852,7 @@ def cv_update_plot(experiment_index):
 				x = cv_data['potential_data_finalcycle'][potential_window][scanrate]
 				y = cv_data['current_data_finalcycle'][potential_window][scanrate]
 				cv_prev_exp_curve = plot_frame.plot(x, y, pen=pen)
-				legend.addItem(cv_prev_exp_curve, f"Previous experiment: {potential_window} V; {scanrate} mV/s")
+				add_legend_item(legend, cv_prev_exp_curve, f"Previous experiment: {potential_window} V; {scanrate} mV/s")
 
 	# Plot current limits
 	if cv_plot_options_reverse_currents_checkbox.isChecked():
@@ -2847,7 +2910,7 @@ def lsv_checkbutton_callback():
 	# Initialise with parameters_checked = False, filenames_checked = False, and a check button style reset
 	lsv_parameters_checked = False
 	lsv_filenames_checked = False
-	lsv_variables_checkbutton.setStyleSheet("")
+	lsv_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	lsv_info_program_state_entry.setText("No experiments running")
@@ -2884,7 +2947,7 @@ def lsv_checkbutton_callback():
 	lsv_parameters_checked = True
 
 	# Make check button green
-	lsv_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	lsv_variables_checkbutton.mark_valid()
 
 	# Calculate the time this experiment will take
 	lsv_calculate_experiment_time(lsv_current_exp_index, initial=True)
@@ -4003,7 +4066,7 @@ def lsv_reset_experiment_controller(mode):
 			# Reset globals
 			lsv_parameters_checked = False
 			lsv_filenames_checked = False
-			lsv_variables_checkbutton.setStyleSheet("")
+			lsv_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			lsv_total_time = None
@@ -4044,8 +4107,8 @@ def lsv_reset_experiment_controller(mode):
 	# Reset globals
 	lsv_parameters_checked = False
 	lsv_filenames_checked = False
-	lsv_variables_checkbutton.setStyleSheet("")
-	lsv_parameters = {'type' : 'lsv'}
+	lsv_variables_checkbutton.clear_valid()
+	lsv_parameters = {'type': 'lsv'}
 	lsv_data = {}
 	lsv_current_exp_index = None
 	lsv_total_time = None
@@ -4154,12 +4217,12 @@ def lsv_preview():
 
 		sweep_curve = pyqtgraph.PlotDataItem([], [], pen='g')
 		init_curve = pyqtgraph.PlotDataItem([], [], pen='w')
-		legend.addItem(sweep_curve, "LSV potential profile")
-		legend.addItem(init_curve, "Initialisation")
+		add_legend_item(legend, sweep_curve, "LSV potential profile")
+		add_legend_item(legend, init_curve, "Initialisation")
 
 		if OCP_in_use:
 			dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-			legend.addItem(dummy_item, f"(estimating OCP as measured potential: {potential:.3f} V)")
+			add_legend_item(legend, dummy_item, f"(estimating OCP as measured potential: {potential:.3f} V)")
 
 		# Plot segment lines and labels
 		all_potentials = [pot for segment in lsv_potentials for pot in segment]
@@ -4453,7 +4516,7 @@ def lsv_update_plot(experiment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Linear sweep voltammetry experiments:")
+	add_legend_item(legend, dummy_item, "Linear sweep voltammetry experiments:")
 
 	# Cache current experiment parameters
 	startpot = lsv_parameters['startpot'][experiment_index]
@@ -4470,7 +4533,7 @@ def lsv_update_plot(experiment_index):
 	lsv_indices = numpy.flatnonzero(segment_types == "Sweeping")
 
 	# Add current experiment to the top of the legend
-	legend.addItem(lsv_plot_curve, f"Current experiment: {current_potential_window} V; {current_scanrate_mV} mV/s")
+	add_legend_item(legend, lsv_plot_curve, f"Current experiment: {current_potential_window} V; {current_scanrate_mV} mV/s")
 
 	# Plot previous experiments
 	if lsv_plot_options_prev_experiments_checkbox.isChecked():
@@ -4491,7 +4554,7 @@ def lsv_update_plot(experiment_index):
 				color = lsv_parameters['plot_pen_color'][potential_window][scanrate_mV]
 				pen = pyqtgraph.mkPen(color=color)
 				lsv_prev_exp_curve = plot_frame.plot(x_prev, y_prev, pen=pen)
-				legend.addItem(lsv_prev_exp_curve, f"Previous experiment: {potential_window} V; {scanrate_mV} mV/s")
+				add_legend_item(legend, lsv_prev_exp_curve, f"Previous experiment: {potential_window} V; {scanrate_mV} mV/s")
 
 				if plot_init_bool:
 					x_init_prev = numpy.array(lsv_data['prev_potential'][potential_window][scanrate_mV])[init_indices_prev]
@@ -4532,20 +4595,20 @@ def lsv_update_plot(experiment_index):
 
 	if lsv_info_current_segment_entry.text() == "Initialising":
 		if len(lsv_time_data.averagebuffer) > 1:
-			legend.addItem(dummy_item, "")
-			legend.addItem(dummy_item, "__________________")
-			legend.addItem(dummy_item, "Initialisation sweep:")
-			legend.addItem(dummy_item, f"Current potential: {potential:.3f}")
-			legend.addItem(dummy_item, f"Next experiment start potential: {lsv_parameters['startpot'][experiment_index]:.3f}")
-			legend.addItem(dummy_item, f"Time to start potential: {lsv_parameters['init_sweep_time'][experiment_index] - lsv_time_data.averagebuffer[-1]:.1f}")
+			add_legend_item(legend, dummy_item, "")
+			add_legend_item(legend, dummy_item, "__________________")
+			add_legend_item(legend, dummy_item, "Initialisation sweep:")
+			add_legend_item(legend, dummy_item, f"Current potential: {potential:.3f}")
+			add_legend_item(legend, dummy_item, f"Next experiment start potential: {lsv_parameters['startpot'][experiment_index]:.3f}")
+			add_legend_item(legend, dummy_item, f"Time to start potential: {lsv_parameters['init_sweep_time'][experiment_index] - lsv_time_data.averagebuffer[-1]:.1f}")
 
 	if lsv_info_current_segment_entry.text() == "Holding":
 		if len(lsv_time_data.averagebuffer) > 1:
 			hold_time_remaining = (lsv_parameters['init_hold_time'] + lsv_parameters['init_sweep_time'][experiment_index]) - lsv_time_data.averagebuffer[-1]
-			legend.addItem(dummy_item, "")
-			legend.addItem(dummy_item, "_____________")
-			legend.addItem(dummy_item, "Holding at start potential:")
-			legend.addItem(dummy_item, f"Hold time remaining: {hold_time_remaining:.1f}")
+			add_legend_item(legend, dummy_item, "")
+			add_legend_item(legend, dummy_item, "_____________")
+			add_legend_item(legend, dummy_item, "Holding at start potential:")
+			add_legend_item(legend, dummy_item, f"Hold time remaining: {hold_time_remaining:.1f}")
 
 def lsv_experiment_progress_controller():
 	"""Called periodically to control updates to the remaining time and progress bar."""
@@ -4578,7 +4641,7 @@ def gcd_checkbutton_callback():
 	# Initialise with gcd_parameters_checked = False, gcd_filenames_checked = False, and a check button style reset
 	gcd_parameters_checked = False
 	gcd_filenames_checked = False
-	gcd_variables_checkbutton.setStyleSheet("")
+	gcd_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	gcd_info_program_state_entry.setText("No experiments running")
@@ -4615,7 +4678,7 @@ def gcd_checkbutton_callback():
 	gcd_parameters_checked = True
 
 	# Make check button green
-	gcd_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	gcd_variables_checkbutton.mark_valid()
 
 	# Calculate the number of halfcycles this experiment will perform
 	gcd_calculate_experiment_halfcycles(initial=True)
@@ -5621,7 +5684,7 @@ def gcd_reset_experiment_controller(mode):
 			# Reset globals
 			gcd_parameters_checked = False
 			gcd_filenames_checked = False
-			gcd_variables_checkbutton.setStyleSheet("")
+			gcd_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			gcd_total_halfcycles = None
@@ -5654,7 +5717,7 @@ def gcd_reset_experiment_controller(mode):
 	# Reset globals
 	gcd_parameters_checked = False
 	gcd_filenames_checked = False
-	gcd_variables_checkbutton.setStyleSheet("")
+	gcd_variables_checkbutton.clear_valid()
 	gcd_parameters = {'type': 'gcd'}
 	gcd_data = {}
 	gcd_current_exp_index = None
@@ -5666,7 +5729,7 @@ def gcd_reset_experiment_controller(mode):
 	# Reset GUI
 	gcd_info_expnum_entry.setText("-/-")
 	gcd_info_halfcyclenum_entry.setText("-/-")
-	gcd_update_num_halfcycles_input_button.setStyleSheet("")
+	gcd_update_num_halfcycles_input_button.clear_valid()
 	gcd_plot_options_nth_cycles_dropdown.clear()
 
 	# Unfreeze input fields
@@ -5864,7 +5927,7 @@ def gcd_write_summary_file(experiment_index, section):
 			gcd_summary_file.write(f"Experiment interruption time: {gcd_data['finishtime_readable'][experiment_index]}\n")
 			gcd_summary_file.write(f"GCD measurement interrupted: {gcd_parameters['lbound'][experiment_index]}/{gcd_parameters['ubound'][experiment_index]} V; {gcd_parameters['charge_current'][experiment_index]}/{gcd_parameters['discharge_current'][experiment_index]} µA\n")
 			gcd_summary_file.write(f"Interrupted measurement data saved to: {gcd_parameters['path_filenames'][experiment_index]}\n")
-			gcd_summary_file.write(f"Interrupted capacities data saved to: {gcd_parameters['path_filenames_capacities']}\n")
+			gcd_summary_file.write(f"Interrupted capacities data saved to: {gcd_parameters['path_filenames_capacities'][experiment_index]}\n")
 
 			gcd_summary_file.write("\n")
 			gcd_summary_file.write("**********************\n")
@@ -5935,13 +5998,13 @@ def gcd_update_num_halfcycles_input():
 
 	# Remove new number of half cycles from input field and make button green
 	gcd_update_num_halfcycles_input_entry.setText("")
-	gcd_update_num_halfcycles_input_button.setStyleSheet("background-color: green; color: white;")
+	gcd_update_num_halfcycles_input_button.mark_valid()
 
 	# Start timer to reset button stylesheet
 	if gcd_update_num_halfcycles_input_button_timer is None:
 		gcd_update_num_halfcycles_input_button_timer = QtCore.QTimer()
 		gcd_update_num_halfcycles_input_button_timer.setSingleShot(True)  # We only need it to trigger once
-		gcd_update_num_halfcycles_input_button_timer.timeout.connect(lambda: gcd_update_num_halfcycles_input_button.setStyleSheet(""))  # Revert to original
+		gcd_update_num_halfcycles_input_button_timer.timeout.connect(lambda: gcd_update_num_halfcycles_input_button.clear_valid())  # Revert to original
 	gcd_update_num_halfcycles_input_button_timer.start(1000)
 
 	# Write updated number of half cycles to summary file
@@ -5982,7 +6045,7 @@ def gcd_update_plot(experiment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Galvanostatic charge/discharge experiments:")
+	add_legend_item(legend, dummy_item, "Galvanostatic charge/discharge experiments:")
 
 	# Determine x-axis units
 	if gcd_plot_options_x_time_radiobutton.isChecked():
@@ -6001,7 +6064,7 @@ def gcd_update_plot(experiment_index):
 	current_cd_current = f"{chg_curr}/{dis_curr}"
 
 	# Add current cycle to the top of the legend
-	legend.addItem(gcd_plot_curve, f"Current experiment: {current_potential_window} V; {current_cd_current} µA")
+	add_legend_item(legend, gcd_plot_curve, f"Current experiment: {current_potential_window} V; {current_cd_current} µA")
 
 	# Plot previous 10 cycles from this experiment
 	if gcd_plot_options_prev10_cycles_radiobutton.isChecked():
@@ -6084,7 +6147,7 @@ def gcd_update_plot(experiment_index):
 					gcd_prev_exps_curve = plot_frame.plot(x1, y1, pen=pen)
 					plot_frame.plot(x2, y2, pen=pen)
 
-				legend.addItem(gcd_prev_exps_curve, f"Previous experiment: {window} V; {curr} µA")
+				add_legend_item(legend, gcd_prev_exps_curve, f"Previous experiment: {window} V; {curr} µA")
 
 	# Plot current cycle over the top
 	if x_key == "time_data":
@@ -6128,7 +6191,7 @@ def ca_checkbutton_callback():
 	# Initialise with parameters_checked = False, filenames_checked = False, and a check button style reset
 	ca_parameters_checked = False
 	ca_filenames_checked = False
-	ca_variables_checkbutton.setStyleSheet("")
+	ca_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	ca_info_program_state_entry.setText("No experiments running")
@@ -6165,7 +6228,7 @@ def ca_checkbutton_callback():
 	ca_parameters_checked = True
 
 	# Make check button green
-	ca_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	ca_variables_checkbutton.mark_valid()
 
 	# Store the number of halfcycles this experiment will perform
 	ca_total_segments = ca_parameters['num_segments']
@@ -7211,6 +7274,16 @@ def ca_start(segment_index):
 		for data in [ca_time_data, ca_segment_time_data, ca_potential_data, ca_current_data]:
 			data.samples = []
 
+		# Re-calculate ramp time and segment timelength based on measured potential
+		if ca_parameters['ramp_rate'][segment_index] != "STEP":
+			ramp_rate = ca_parameters['ramp_rate'][segment_index]
+			segment_potential = ca_parameters['potential_sequence'][segment_index]
+			segment_potential = segment_potential if segment_potential != "OCP" else ca_parameters['current_OCP']
+			potential_to_sweep = segment_potential - ca_data['startpot'][segment_index]
+			ramp_time = abs(potential_to_sweep / ramp_rate)
+			ca_parameters['ramp_time'][segment_index] = ramp_time
+			ca_parameters['segment_timelength'][segment_index] = ramp_time + ca_parameters['hold_time'][segment_index]
+
 	# Initialise deque to store current history for equilibration
 	ca_curr_eq_history = collections.deque()
 
@@ -7236,8 +7309,11 @@ def ca_update(segment_index):
 
 		# Progress to the next segment
 		ca_stop(segment_index, interrupted=False)
+		return
 
 	else:
+		read_potential_current()  # Read new potential and current
+
 		# DAC control logic
 		ramp_rate = ca_parameters['ramp_rate'][segment_index]
 		ramp_time = ca_parameters['ramp_time'][segment_index]
@@ -7255,8 +7331,6 @@ def ca_update(segment_index):
 					holdpot = ca_parameters['current_OCP']
 				set_output(0, holdpot)  # Send potential to the DAC
 				ca_potential_hold = True
-
-		read_potential_current()  # Read new potential and current
 
 		if skipcounter == 0:  # Process new measurements
 			ca_time_data.add_sample(elapsed_time)
@@ -7443,7 +7517,7 @@ def ca_reset_experiment_controller(mode):
 			# Reset globals
 			ca_parameters_checked = False
 			ca_filenames_checked = False
-			ca_variables_checkbutton.setStyleSheet("")
+			ca_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			ca_total_segments = None
@@ -7484,7 +7558,7 @@ def ca_reset_experiment_controller(mode):
 	# Reset globals
 	ca_parameters_checked = False
 	ca_filenames_checked = False
-	ca_variables_checkbutton.setStyleSheet("")
+	ca_variables_checkbutton.clear_valid()
 	ca_parameters = {'type': 'ca'}
 	ca_data = {}
 	ca_total_segments = None
@@ -7594,11 +7668,11 @@ def ca_preview():
 		legend_in_use = 'ca_preview'
 
 		potential_curve = pyqtgraph.PlotDataItem([], [], pen='g')
-		legend.addItem(potential_curve, "Chronoamperometry potential profile")
+		add_legend_item(legend, potential_curve, "Chronoamperometry potential profile")
 
 		if OCP_in_use:
 			dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-			legend.addItem(dummy_item, f"(estimating OCP as measured potential: {potential:.3f} V)")
+			add_legend_item(legend, dummy_item, f"(estimating OCP as measured potential: {potential:.3f} V)")
 
 		# Plot individual segment lines
 		min_pot = min(potential_sequence)
@@ -7838,7 +7912,7 @@ def ca_update_plot(segment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Chronoamperometry experiment:")
+	add_legend_item(legend, dummy_item, "Chronoamperometry experiment:")
 
 	# Initialise plotting arrays and lists
 	time_data = numpy.array([])
@@ -7880,23 +7954,23 @@ def ca_update_plot(segment_index):
 	plot_frame.addItem(ca_current_plot_curve)
 	plot_frame.addItem(ca_potential_plot_curve)
 
-	legend.addItem(ca_current_plot_curve, "Current")
-	legend.addItem(ca_potential_plot_curve, "Potential (scaled)")
+	add_legend_item(legend, ca_current_plot_curve, "Current")
+	add_legend_item(legend, ca_potential_plot_curve, "Potential (scaled)")
 
 	# Add equilibration info to legend
 	if ca_parameters['curr_eq_tolerance'][segment_index] is not None:
-		legend.addItem(dummy_item, "")
-		legend.addItem(dummy_item, "Equilibration information:")
-		legend.addItem(dummy_item, f"Tolerance (µA): {ca_parameters['curr_eq_tolerance'][segment_index]}")
-		legend.addItem(dummy_item, f"Timescale (s): {ca_parameters['curr_eq_timescale'][segment_index]}")
+		add_legend_item(legend, dummy_item, "")
+		add_legend_item(legend, dummy_item, "Equilibration information:")
+		add_legend_item(legend, dummy_item, f"Tolerance (µA): {ca_parameters['curr_eq_tolerance'][segment_index]}")
+		add_legend_item(legend, dummy_item, f"Timescale (s): {ca_parameters['curr_eq_timescale'][segment_index]}")
 		if ca_curr_eq_history:
 			if ca_curr_eq_history[-1][0] >= ca_parameters['curr_eq_timescale'][segment_index]:
-				legend.addItem(dummy_item, f"Current {ca_parameters['curr_eq_timescale'][segment_index]} s ago (µA): {ca_curr_eq_history[0][1] * 1e6:.3g}")
+				add_legend_item(legend, dummy_item, f"Current {ca_parameters['curr_eq_timescale'][segment_index]} s ago (µA): {ca_curr_eq_history[0][1] * 1e6:.3g}")
 			else:
-				legend.addItem(dummy_item, f"Current {ca_curr_eq_history[-1][0] - ca_curr_eq_history[0][0]:.3f} s ago (µA): {ca_curr_eq_history[0][1] * 1e6:.3g}")
-			legend.addItem(dummy_item, f"Measured current (µA): {ca_curr_eq_history[-1][1] * 1e6:.3g}")
+				add_legend_item(legend, dummy_item, f"Current {ca_curr_eq_history[-1][0] - ca_curr_eq_history[0][0]:.3f} s ago (µA): {ca_curr_eq_history[0][1] * 1e6:.3g}")
+			add_legend_item(legend, dummy_item, f"Measured current (µA): {ca_curr_eq_history[-1][1] * 1e6:.3g}")
 			curr_diff = (ca_curr_eq_history[-1][1] - ca_curr_eq_history[0][1])
-			legend.addItem(dummy_item, f"Difference (µA): {curr_diff * 1e6:.3g}")
+			add_legend_item(legend, dummy_item, f"Difference (µA): {curr_diff * 1e6:.3g}")
 
 def ca_update_progress_bar():
 	"""Update the progress bar to reflect percentage of segments completed."""
@@ -7917,7 +7991,7 @@ def cp_checkbutton_callback():
 	# Initialise with parameters_checked = False, filenames_checked = False, and a check button style reset
 	cp_parameters_checked = False
 	cp_filenames_checked = False
-	cp_variables_checkbutton.setStyleSheet("")
+	cp_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	cp_info_program_state_entry.setText("No experiments running")
@@ -7954,7 +8028,7 @@ def cp_checkbutton_callback():
 	cp_parameters_checked = True
 
 	# Make check button green
-	cp_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	cp_variables_checkbutton.mark_valid()
 
 	# Store the number of halfcycles this experiment will perform
 	cp_total_segments = cp_parameters['num_segments']
@@ -8969,6 +9043,15 @@ def cp_start(segment_index):
 		for data in [cp_time_data, cp_segment_time_data, cp_potential_data, cp_current_data]:
 			data.samples = []
 
+		# Re-calculate ramp time and segment timelength based on measured current
+		if cp_parameters['ramp_rate'][segment_index] != "STEP":
+			ramp_rate = cp_parameters['ramp_rate'][segment_index]
+			segment_current = cp_parameters['current_sequence'][segment_index]
+			current_to_sweep = segment_current - cp_data['startcurr'][segment_index] * 1e3  # Convert from mA to µA
+			ramp_time = abs(current_to_sweep / ramp_rate)
+			cp_parameters['ramp_time'][segment_index] = ramp_time
+			cp_parameters['segment_timelength'][segment_index] = ramp_time + cp_parameters['hold_time'][segment_index]
+
 	# Initialise deque to store potential history for equilibration
 	cp_pot_eq_history = collections.deque()
 
@@ -8997,6 +9080,8 @@ def cp_update(segment_index):
 		return
 
 	else:
+		read_potential_current()  # Read new potential and current
+
 		# DAC control logic
 		ramp_rate = cp_parameters['ramp_rate'][segment_index]
 		ramp_time = cp_parameters['ramp_time'][segment_index]
@@ -9016,8 +9101,6 @@ def cp_update(segment_index):
 				set_current_range()  # Set new current range
 				set_output(1, cp_currentsetpoint)  # Send current to the DAC
 				cp_currentsetpoint_hold = True
-
-		read_potential_current()  # Read new potential and current
 
 		cp_time_data.add_sample(elapsed_time)
 		cp_segment_time_data.add_sample(segment_elapsed_time)
@@ -9206,7 +9289,7 @@ def cp_reset_experiment_controller(mode):
 			# Reset globals
 			cp_parameters_checked = False
 			cp_filenames_checked = False
-			cp_variables_checkbutton.setStyleSheet("")
+			cp_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			cp_total_segments = None
@@ -9247,7 +9330,7 @@ def cp_reset_experiment_controller(mode):
 	# Reset globals
 	cp_parameters_checked = False
 	cp_filenames_checked = False
-	cp_variables_checkbutton.setStyleSheet("")
+	cp_variables_checkbutton.clear_valid()
 	cp_parameters = {'type': 'cp'}
 	cp_data = {}
 	cp_total_segments = None
@@ -9267,7 +9350,7 @@ def cp_reset_experiment_controller(mode):
 
 	elif mode == "interrupted":
 		cp_info_program_state_entry.setText(f"Experiments interrupted")
-		cp_progress_bar.set_completed_state()
+		cp_progress_bar.set_interrupted_state()
 
 	elif mode == "OCP_interrupted":
 		cp_progress_bar.set_OCP_interrupted_state()
@@ -9353,7 +9436,7 @@ def cp_preview():
 		legend_in_use = 'cp_preview'
 
 		current_curve = pyqtgraph.PlotDataItem([], [], pen='g')
-		legend.addItem(current_curve, "Chronopotentiometry current profile")
+		add_legend_item(legend, current_curve, "Chronopotentiometry current profile")
 
 		# Plot individual segment lines
 		min_curr = min(current_sequence)
@@ -9625,7 +9708,7 @@ def cp_update_plot(segment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Chronopotentiometry experiment:")
+	add_legend_item(legend, dummy_item, "Chronopotentiometry experiment:")
 
 	time_data = numpy.array([])
 	current_data = numpy.array([])
@@ -9666,23 +9749,23 @@ def cp_update_plot(segment_index):
 	plot_frame.addItem(cp_current_plot_curve)
 	plot_frame.addItem(cp_potential_plot_curve)
 
-	legend.addItem(cp_potential_plot_curve, "Potential")
-	legend.addItem(cp_current_plot_curve, "Current (scaled)")
+	add_legend_item(legend, cp_potential_plot_curve, "Potential")
+	add_legend_item(legend, cp_current_plot_curve, "Current (scaled)")
 
 	# Add equilibration info to legend
 	if cp_parameters['pot_eq_tolerance'][segment_index] is not None:
-		legend.addItem(dummy_item, "")
-		legend.addItem(dummy_item, "Equilibration information:")
-		legend.addItem(dummy_item, f"Tolerance (mV): {cp_parameters['pot_eq_tolerance'][segment_index]}")
-		legend.addItem(dummy_item, f"Timescale (s): {cp_parameters['pot_eq_timescale'][segment_index]}")
+		add_legend_item(legend, dummy_item, "")
+		add_legend_item(legend, dummy_item, "Equilibration information:")
+		add_legend_item(legend, dummy_item, f"Tolerance (mV): {cp_parameters['pot_eq_tolerance'][segment_index]}")
+		add_legend_item(legend, dummy_item, f"Timescale (s): {cp_parameters['pot_eq_timescale'][segment_index]}")
 		if cp_pot_eq_history:
 			if cp_pot_eq_history[-1][0] >= cp_parameters['pot_eq_timescale'][segment_index]:
-				legend.addItem(dummy_item, f"Potential {cp_parameters['pot_eq_timescale'][segment_index]} s ago (mV): {cp_pot_eq_history[0][1] * 1000:.3g}")
+				add_legend_item(legend, dummy_item, f"Potential {cp_parameters['pot_eq_timescale'][segment_index]} s ago (mV): {cp_pot_eq_history[0][1] * 1000:.3g}")
 			else:
-				legend.addItem(dummy_item, f"Potential {cp_pot_eq_history[-1][0] - cp_pot_eq_history[0][0]:.3f} s ago (mV): {cp_pot_eq_history[0][1] * 1000:.3g}")
-			legend.addItem(dummy_item, f"Measured potential (mV): {cp_pot_eq_history[-1][1] * 1000:.3g}")
+				add_legend_item(legend, dummy_item, f"Potential {cp_pot_eq_history[-1][0] - cp_pot_eq_history[0][0]:.3f} s ago (mV): {cp_pot_eq_history[0][1] * 1000:.3g}")
+			add_legend_item(legend, dummy_item, f"Measured potential (mV): {cp_pot_eq_history[-1][1] * 1000:.3g}")
 			pot_diff = (cp_pot_eq_history[-1][1] - cp_pot_eq_history[0][1])
-			legend.addItem(dummy_item, f"Difference (mV): {pot_diff * 1000:.3g}")
+			add_legend_item(legend, dummy_item, f"Difference (mV): {pot_diff * 1000:.3g}")
 
 def cp_update_progress_bar():
 	"""Update the progress bar to reflect percentage of segments completed."""
@@ -9703,7 +9786,7 @@ def sd_checkbutton_callback():
 	# Initialise with parameters_checked = False, filenames_checked = False, and a check button style reset
 	sd_parameters_checked = False
 	sd_filenames_checked = False
-	sd_variables_checkbutton.setStyleSheet("")
+	sd_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	sd_info_program_state_entry.setText("No experiments running")
@@ -9740,7 +9823,7 @@ def sd_checkbutton_callback():
 	sd_parameters_checked = True
 
 	# Make check button green
-	sd_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	sd_variables_checkbutton.mark_valid()
 
 	# Calculate the number of halfcycles this experiment will perform
 	sd_total_segments = sd_parameters['num_segments']
@@ -10562,6 +10645,8 @@ def sd_update(segment_index):
 		return
 
 	else:
+		read_potential_current()  # Read new potential and current
+
 		# DAC control logic
 		ramp_rate = sd_parameters['ramp_rate'][segment_index]
 		ramp_time = sd_parameters['ramp_time'][segment_index]
@@ -10588,8 +10673,6 @@ def sd_update(segment_index):
 				sd_info_charge_self_discharge_entry.setText("Self-discharging")
 				sd_parameters['charging/self-discharging'][segment_index] = "Self-discharging"
 				sd_acquiring = True
-
-		read_potential_current()  # Read new potential and current
 
 		if skipcounter == 0:  # Process new measurements
 			sd_time_data.add_sample(elapsed_time)
@@ -10771,7 +10854,7 @@ def sd_reset_experiment_controller(mode):
 			# Reset globals
 			sd_parameters_checked = False
 			sd_filenames_checked = False
-			sd_variables_checkbutton.setStyleSheet("")
+			sd_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			sd_total_segments = None
@@ -10783,11 +10866,6 @@ def sd_reset_experiment_controller(mode):
 		return
 
 	elif mode == "checkbutton_failed":
-
-		# Reset globals
-		sd_parameters_checked = False
-		sd_filenames_checked = False
-		sd_variables_checkbutton.setStyleSheet("")
 
 		# Reset progress bar
 		sd_total_segments = None
@@ -10809,7 +10887,7 @@ def sd_reset_experiment_controller(mode):
 	# Reset globals
 	sd_parameters_checked = False
 	sd_filenames_checked = False
-	sd_variables_checkbutton.setStyleSheet("")
+	sd_variables_checkbutton.clear_valid()
 	sd_parameters = {'type': 'sd'}
 	sd_data = {}
 	sd_total_segments = None
@@ -10888,6 +10966,7 @@ def sd_write_summary_file(segment_index, section):
 			sd_summary_file.write("\n")
 
 			sd_summary_file.write("Self-discharge acquisition parameters:\n")
+			sd_summary_file.write(f"Acquisition time (s): {sd_parameters['acquisition_time'][segment_index]}\n")
 			sd_summary_file.write(f"Potential cutoff threshold (V): {sd_parameters['pot_cutoff'][segment_index]}\n")
 			sd_summary_file.write(f"Equilibration tolerance (mV): {sd_parameters['pot_eq_tolerance'][segment_index]}\n")
 			sd_summary_file.write(f"Equilibration timescale (s): {sd_parameters['pot_eq_timescale'][segment_index]}\n")
@@ -10998,7 +11077,7 @@ def sd_update_plot(segment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Self-discharge experiments:")
+	add_legend_item(legend, dummy_item, "Self-discharge experiments:")
 
 	# Store whether plotting charging
 	plot_chg_bool = sd_plot_options_show_charging_checkbox.isChecked()
@@ -11015,7 +11094,7 @@ def sd_update_plot(segment_index):
 		ref_time = sd_parameters['charging_time'][segment_index]  # At estimated start of discharge
 
 	# Add current segment to the top of the legend
-	legend.addItem(sd_discharge_potential_plot_curve, f"Current self-discharge: {sd_parameters['charge_potential'][segment_index]}")
+	add_legend_item(legend, sd_discharge_potential_plot_curve, f"Current self-discharge: {sd_parameters['charge_potential'][segment_index]} V")
 
 	# Plot all previous segments
 	if sd_plot_options_all_segments_radiobutton.isChecked():
@@ -11035,7 +11114,7 @@ def sd_update_plot(segment_index):
 				color = sd_parameters['plot_pen_color'][seg_idx]
 				pen = pyqtgraph.mkPen(color=color)
 				sd_prev_seg_potential_curve = plot_frame.plot(x_sd_prev, y_sd_prev, pen=pen)
-				legend.addItem(sd_prev_seg_potential_curve, f"Previous segment: {sd_parameters['charge_potential'][seg_idx]} V")
+				add_legend_item(legend, sd_prev_seg_potential_curve, f"Previous segment: {sd_parameters['charge_potential'][seg_idx]} V")
 
 				if plot_chg_bool:
 					x_chg_prev = segment_time_prev[chg_indices_prev] - ref_time_prev
@@ -11066,14 +11145,14 @@ def sd_update_plot(segment_index):
 		y_chg = numpy.array(sd_data['potential'][segment_index])[chg_indices]
 		sd_charge_potential_plot_curve.setData(x_chg, y_chg)
 		plot_frame.addItem(sd_charge_potential_plot_curve)
-		legend.addItem(sd_charge_potential_plot_curve, f"Charging potential")
+		add_legend_item(legend, sd_charge_potential_plot_curve, f"Charging potential")
 
 	# Update legend for acquisition segments
 	if sd_parameters['charging/self-discharging'][segment_index] == "Self-discharging":
 
 		if sd_parameters['pot_cutoff'][segment_index]:
-			legend.addItem(dummy_item, "")
-			legend.addItem(dummy_item, "Current segment potential cutoff information:")
+			add_legend_item(legend, dummy_item, "")
+			add_legend_item(legend, dummy_item, "Current segment potential cutoff information:")
 			pot_cutoff = sd_parameters['pot_cutoff'][segment_index]
 			if pot_cutoff == "OCP":
 				pot_cutoff = sd_parameters['current_OCP']
@@ -11081,22 +11160,22 @@ def sd_update_plot(segment_index):
 			else:
 				pot_cutoff_str = f"{sd_parameters['pot_cutoff'][segment_index]}"
 			pot_cutoff_diff = (y_sd[-1] - pot_cutoff)
-			legend.addItem(dummy_item, f"Cutoff potential (V): {pot_cutoff_str}")
-			legend.addItem(dummy_item, f"Distance to cutoff (V): {pot_cutoff_diff:.3g}")
+			add_legend_item(legend, dummy_item, f"Cutoff potential (V): {pot_cutoff_str}")
+			add_legend_item(legend, dummy_item, f"Distance to cutoff (V): {pot_cutoff_diff:.3g}")
 
 		if sd_parameters['pot_eq_tolerance'][segment_index]:
-			legend.addItem(dummy_item, "")
-			legend.addItem(dummy_item, "Current segment equilibration information:")
-			legend.addItem(dummy_item, f"Equilibration tolerance (mV): {sd_parameters['pot_eq_tolerance'][segment_index]}")
-			legend.addItem(dummy_item, f"Equilibration timescale (s): {sd_parameters['pot_eq_timescale'][segment_index]}")
+			add_legend_item(legend, dummy_item, "")
+			add_legend_item(legend, dummy_item, "Current segment equilibration information:")
+			add_legend_item(legend, dummy_item, f"Equilibration tolerance (mV): {sd_parameters['pot_eq_tolerance'][segment_index]}")
+			add_legend_item(legend, dummy_item, f"Equilibration timescale (s): {sd_parameters['pot_eq_timescale'][segment_index]}")
 			if sd_pot_eq_history:
 				if sd_pot_eq_history[-1][0] >= sd_parameters['pot_eq_timescale'][segment_index] + sd_parameters['charging_time'][segment_index]:
-					legend.addItem(dummy_item, f"Potential {sd_parameters['pot_eq_timescale'][segment_index]} s ago (mV): {sd_pot_eq_history[0][1] * 1000:.3g}")
+					add_legend_item(legend, dummy_item, f"Potential {sd_parameters['pot_eq_timescale'][segment_index]} s ago (mV): {sd_pot_eq_history[0][1] * 1000:.3g}")
 				else:
-					legend.addItem(dummy_item, f"Potential {sd_pot_eq_history[-1][0] - sd_pot_eq_history[0][0]:.3f} s ago (mV): {sd_pot_eq_history[0][1] * 1000:.3g}")
-				legend.addItem(dummy_item, f"Measured potential (mV): {sd_pot_eq_history[-1][1] * 1000:.3g}")
+					add_legend_item(legend, dummy_item, f"Potential {sd_pot_eq_history[-1][0] - sd_pot_eq_history[0][0]:.3f} s ago (mV): {sd_pot_eq_history[0][1] * 1000:.3g}")
+				add_legend_item(legend, dummy_item, f"Measured potential (mV): {sd_pot_eq_history[-1][1] * 1000:.3g}")
 				pot_diff = (sd_pot_eq_history[-1][1] - sd_pot_eq_history[0][1])
-				legend.addItem(dummy_item, f"Difference (mV): {pot_diff * 1000:.3g}")
+				add_legend_item(legend, dummy_item, f"Difference (mV): {pot_diff * 1000:.3g}")
 
 def sd_update_progress_bar():
 	"""Update the progress bar to reflect percentage of segments completed."""
@@ -11117,7 +11196,7 @@ def rate_checkbutton_callback():
 	# Initialise with parameters_checked = False, filenames_checked = False, and a check button style reset
 	rate_parameters_checked = False
 	rate_filenames_checked = False
-	rate_variables_checkbutton.setStyleSheet("")
+	rate_variables_checkbutton.clear_valid()
 
 	# Remove any previous program state entry
 	rate_info_program_state_entry.setText("No experiments running")
@@ -11154,7 +11233,7 @@ def rate_checkbutton_callback():
 	rate_parameters_checked = True
 
 	# Make check button green
-	rate_variables_checkbutton.setStyleSheet("background-color: green; color: white;")
+	rate_variables_checkbutton.mark_valid()
 
 	# Store the number of C-rates this experiment will perform
 	rate_total_c_rates = rate_parameters['total_c_rates']
@@ -11481,7 +11560,7 @@ def rate_get_parameters():
 		rate_parameters['num_halfcycles'] = 2 * int(rate_params_c_rate_num_cycles_entry.text().strip())
 
 		# Pre-C-rate delay
-		rate_parameters['c_rate_delay'] = int(rate_params_c_rate_delay_entry.text().strip())
+		rate_parameters['c_rate_delay'] = float(rate_params_c_rate_delay_entry.text().strip())
 
 		# Pre-experiment delay
 		if rate_params_delay_OCP_checkbox.isChecked():
@@ -12481,7 +12560,7 @@ def rate_reset_experiment_controller(mode):
 			# Reset globals
 			rate_parameters_checked = False
 			rate_filenames_checked = False
-			rate_variables_checkbutton.setStyleSheet("")
+			rate_variables_checkbutton.clear_valid()
 
 			# Reset progress bar
 			rate_total_c_rates = None
@@ -12514,7 +12593,7 @@ def rate_reset_experiment_controller(mode):
 	# Reset globals
 	rate_parameters_checked = False
 	rate_filenames_checked = False
-	rate_variables_checkbutton.setStyleSheet("")
+	rate_variables_checkbutton.clear_valid()
 	rate_parameters = {'type': 'rate'}
 	rate_data = {}
 	rate_total_c_rates = None
@@ -12826,10 +12905,10 @@ def rate_update_plot(experiment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Rate-testing experiments:")
-	legend.addItem(dummy_item, f"Current experiment C-rate: {rate_parameters['c_rates'][rate_current_c_rate_index]} C")
-	legend.addItem(dummy_item, f"Current experiment halfcycle: {rate_current_halfcyclenum}/{rate_parameters['num_halfcycles']}")
-	legend.addItem(dummy_item, "")
+	add_legend_item(legend, dummy_item, "Rate-testing experiments:")
+	add_legend_item(legend, dummy_item, f"Current experiment C-rate: {rate_parameters['c_rates'][rate_current_c_rate_index]} C")
+	add_legend_item(legend, dummy_item, f"Current experiment halfcycle: {rate_current_halfcyclenum}/{rate_parameters['num_halfcycles']}")
+	add_legend_item(legend, dummy_item, "")
 
 	c_rates = rate_parameters['c_rates']
 	chg_vals = rate_data['final_chg_charge'].get(experiment_index, {})
@@ -12861,10 +12940,10 @@ def rate_update_plot(experiment_index):
 
 	# Add current charges to the top of the legend
 	if chg_x_data_curr:
-		legend.addItem(rate_chg_plot_scatter, f"Charge from current experiment: {rate_parameters['lbound'][experiment_index]}/{rate_parameters['ubound'][experiment_index]} V")
+		add_legend_item(legend, rate_chg_plot_scatter, f"Charge from current experiment: {rate_parameters['lbound'][experiment_index]}/{rate_parameters['ubound'][experiment_index]} V")
 
 	if dis_x_data_curr:
-		legend.addItem(rate_dis_plot_scatter, f"Discharge from current experiment: {rate_parameters['lbound'][experiment_index]}/{rate_parameters['ubound'][experiment_index]} V")
+		add_legend_item(legend, rate_dis_plot_scatter, f"Discharge from current experiment: {rate_parameters['lbound'][experiment_index]}/{rate_parameters['ubound'][experiment_index]} V")
 
 	# Plot data from all previous experiments
 	if rate_plot_options_all_prev_experiments_radiobutton.isChecked():
@@ -12885,8 +12964,8 @@ def rate_update_plot(experiment_index):
 			rate_prev_exp_chg_curve = plot_frame.plot(x_data_prev, chg_y_data_prev, pen=None, symbol='t1', symbolPen=pen, symbolBrush=color)
 			rate_prev_exp_dis_curve = plot_frame.plot(x_data_prev, dis_y_data_prev, pen=None, symbol='t', symbolPen=pen, symbolBrush=None)
 
-			legend.addItem(rate_prev_exp_chg_curve, f"Charge from previous experiment: {rate_parameters['lbound'][i]}/{rate_parameters['ubound'][i]} V")
-			legend.addItem(rate_prev_exp_dis_curve, f"Discharge from previous experiment: {rate_parameters['lbound'][i]}/{rate_parameters['ubound'][i]} V")
+			add_legend_item(legend, rate_prev_exp_chg_curve, f"Charge from previous experiment: {rate_parameters['lbound'][i]}/{rate_parameters['ubound'][i]} V")
+			add_legend_item(legend, rate_prev_exp_dis_curve, f"Discharge from previous experiment: {rate_parameters['lbound'][i]}/{rate_parameters['ubound'][i]} V")
 
 	# Plot current charges over the top
 	if chg_x_data_curr:
@@ -12920,10 +12999,10 @@ def rate_one_c_calc_update_plot(experiment_index):
 
 	# Title for legend
 	dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-	legend.addItem(dummy_item, "Calculating 1C:")
-	legend.addItem(rate_one_c_calc_plot_curve, f"Calculating for experiment: {rate_parameters['lbound'][experiment_index]}/{rate_parameters['ubound'][experiment_index]} V")
-	legend.addItem(dummy_item, f"Charge/Discharge current: {rate_parameters['one_c_calc_current']} µA")
-	legend.addItem(dummy_item, f"Cycle: {rate_one_c_calc_current_cyclenum}/{rate_parameters['one_c_calc_num_cycles']}")
+	add_legend_item(legend, dummy_item, "Calculating 1C:")
+	add_legend_item(legend, rate_one_c_calc_plot_curve, f"Calculating for experiment: {rate_parameters['lbound'][experiment_index]}/{rate_parameters['ubound'][experiment_index]} V")
+	add_legend_item(legend, dummy_item, f"Charge/Discharge current: {rate_parameters['one_c_calc_current']} µA")
+	add_legend_item(legend, dummy_item, f"Cycle: {rate_one_c_calc_current_cyclenum}/{rate_parameters['one_c_calc_num_cycles']}")
 
 def rate_update_progress_bar():
 	"""Update the progress bar to reflect percentage of C-rates completed."""
@@ -12983,7 +13062,7 @@ def OCP_equilibration_controller(experiment_parameters, experiment_data, experim
 		plot_frame.setLabel('bottom', 'Time', units="s")
 		plot_frame.setLabel('left', 'Potential', units="V")
 		OCP_potential_plot_curve = plot_frame.plot(pen='y')
-		legend = pyqtgraph.LegendItem(offset=(60, 30))
+		legend = pyqtgraph.LegendItem(offset=(60, 10))
 		legend.setParentItem(plot_frame.plotItem)
 		Legends.legends['OCP_eq'] = legend
 		legend_in_use = 'OCP_eq'
@@ -13528,21 +13607,21 @@ def OCP_equilibration_update_live_graph(experiment_parameters, elapsed_time):
 		experiment_str = experiment_names.get(param_type, "UNKNOWN EXPERIMENT")
 
 		dummy_item = pyqtgraph.PlotDataItem([], [], pen=None)
-		legend.addItem(OCP_potential_plot_curve, "Potential (V)")
-		legend.addItem(dummy_item, "")
-		legend.addItem(dummy_item, f"OCP EQUILIBRATION INFO FOR {experiment_str} EXPERIMENTS:")
-		legend.addItem(dummy_item, f"Equilibration tolerance (mV): {float(global_software_settings['OCP_eq_tolerance']):.3g}")
-		legend.addItem(dummy_item, f"Equilibration timescale (s): {global_software_settings['OCP_eq_timescale']:.3g}")
-		legend.addItem(dummy_item, f"Equilibration timeout (s): {global_software_settings['OCP_eq_timeout']:.3g}")
-		legend.addItem(dummy_item, "")
-		legend.addItem(dummy_item, f"Elapsed time (s): {elapsed_time:.3f}")
+		add_legend_item(legend, OCP_potential_plot_curve, "Potential (V)")
+		add_legend_item(legend, dummy_item, "")
+		add_legend_item(legend, dummy_item, f"OCP EQUILIBRATION INFO FOR {experiment_str} EXPERIMENTS:")
+		add_legend_item(legend, dummy_item, f"Equilibration tolerance (mV): {float(global_software_settings['OCP_eq_tolerance']):.3g}")
+		add_legend_item(legend, dummy_item, f"Equilibration timescale (s): {global_software_settings['OCP_eq_timescale']:.3g}")
+		add_legend_item(legend, dummy_item, f"Equilibration timeout (s): {global_software_settings['OCP_eq_timeout']:.3g}")
+		add_legend_item(legend, dummy_item, "")
+		add_legend_item(legend, dummy_item, f"Elapsed time (s): {elapsed_time:.3f}")
 		if elapsed_time >= global_software_settings['OCP_eq_timescale']:
-			legend.addItem(dummy_item, f"Potential {global_software_settings['OCP_eq_timescale']} s ago (mV): {OCP_eq_history[0][1] * 1000:.3g}")
+			add_legend_item(legend, dummy_item, f"Potential {global_software_settings['OCP_eq_timescale']} s ago (mV): {OCP_eq_history[0][1] * 1000:.3g}")
 		else:
-			legend.addItem(dummy_item, f"Potential {elapsed_time:.3f} s ago (mV): {OCP_eq_history[0][1] * 1000:.3g}")
-		legend.addItem(dummy_item, f"Measured potential (mV): {OCP_eq_history[-1][1] * 1000:.3g}")
+			add_legend_item(legend, dummy_item, f"Potential {elapsed_time:.3f} s ago (mV): {OCP_eq_history[0][1] * 1000:.3g}")
+		add_legend_item(legend, dummy_item, f"Measured potential (mV): {OCP_eq_history[-1][1] * 1000:.3g}")
 		potential_diff = (OCP_eq_history[-1][1] - OCP_eq_history[0][1])
-		legend.addItem(dummy_item, f"Difference (mV): {potential_diff * 1000:.3g}")
+		add_legend_item(legend, dummy_item, f"Difference (mV): {potential_diff * 1000:.3g}")
 
 
 """_____PROGRESS BARS_____"""
@@ -13562,6 +13641,7 @@ class GenericProgressBar(QtWidgets.QProgressBar):
 				border: 2px {border_style} {border_color};
 				border-radius: 5px;
 				text-align: center;
+				background-color: white;
 			}}
 			QProgressBar::chunk {{
 				background-color: {chunk_color};
@@ -13722,8 +13802,29 @@ class LabeledProgressBar(GenericProgressBar):
 
 
 
-"""_____SET UP THE GUI_____"""
+"""_____CHECK BUTTONS_____"""
 
+class GreenGUIButton(QtWidgets.QPushButton):
+	def __init__(self, text="", parent=None):
+		super().__init__(text, parent)
+		self._is_valid = False  # Track temporary green highlight
+
+	def mark_valid(self):
+		"""Temporarily mark button as valid"""
+		self.setStyleSheet("background-color: green; color: white;")
+		self._is_valid = True
+
+	def clear_valid(self):
+		"""Clear the valid mark and revert to normal style"""
+		self.setStyleSheet("")
+		self._is_valid = False
+
+		self.style().unpolish(self)
+		self.style().polish(self)
+		self.update()
+
+
+"""_____SET UP THE GUI_____"""
 
 """MAIN WINDOW"""
 
@@ -13735,9 +13836,9 @@ win.setWindowTitle('USB potentiostat/galvanostat controller')
 #win.setWindowIcon(QtGui.QIcon('icon/icon.png'))
 
 potential_monitor, potential_monitor_box = make_groupbox_indicator("Measured potential", "+#.### V")
-potential_monitor.setFont(QtGui.QFont("monospace", 8))
+potential_monitor.setFont(custom_size_font(10))
 current_monitor, current_monitor_box = make_groupbox_indicator("Measured current", "+#.### mA")
-current_monitor.setFont(QtGui.QFont("monospace", 8))
+current_monitor.setFont(custom_size_font(10))
 potential_current_display_frame = QtWidgets.QHBoxLayout()
 potential_current_display_frame.setSpacing(1)
 potential_current_display_frame.setContentsMargins(0, 0, 0, 0)
@@ -13748,11 +13849,11 @@ mode_display_frame = QtWidgets.QHBoxLayout()
 mode_display_frame.setSpacing(1)
 mode_display_frame.setContentsMargins(0, 0, 0, 5)
 cell_status_monitor, cell_status_monitor_box = make_groupbox_indicator("Cell status", "        ")
-cell_status_monitor.setFont(custom_size_font(8))
+cell_status_monitor.setFont(custom_size_font(10))
 control_mode_monitor, control_mode_monitor_box = make_groupbox_indicator("Control mode", "             ")
-control_mode_monitor.setFont(custom_size_font(8))
+control_mode_monitor.setFont(custom_size_font(10))
 current_range_monitor, current_range_monitor_box = make_groupbox_indicator("Current range", "     ")
-current_range_monitor.setFont(custom_size_font(8))
+current_range_monitor.setFont(custom_size_font(10))
 mode_display_frame.addWidget(cell_status_monitor_box)
 mode_display_frame.addWidget(control_mode_monitor_box)
 mode_display_frame.addWidget(current_range_monitor_box)
@@ -13780,7 +13881,6 @@ preview_cancel_button.hide()
 """_____TAB FRAMES_____"""
 
 tab_frame = QtWidgets.QTabWidget()
-tab_frame.setFixedWidth(400)
 
 tab_names = ["Hardware", "CV", "LSV", "GCD", "CA", "CP", "Self-discharge", "C-Rate", "Plotting"]
 tabs = [add_my_tab(tab_frame, tab_name) for tab_name in tab_names]
@@ -13840,7 +13940,13 @@ hardware_calibration_box_layout.addLayout(hardware_calibration_dac_hlayout)
 hardware_calibration_dac_vlayout = QtWidgets.QVBoxLayout()
 hardware_calibration_dac_hlayout.addLayout(hardware_calibration_dac_vlayout)
 hardware_calibration_dac_offset = make_label_entry(hardware_calibration_dac_vlayout, "DAC Offset")
+hardware_calibration_dac_offset.setStyleSheet(
+    'QLineEdit[invalid="true"] {background: red;}'
+)
 hardware_calibration_dac_gain = make_label_entry(hardware_calibration_dac_vlayout, "DAC Gain")
+hardware_calibration_dac_gain.setStyleSheet(
+    'QLineEdit[invalid="true"] {background: red;}'
+)
 hardware_calibration_dac_calibrate_button = QtWidgets.QPushButton("Auto\nCalibrate")
 hardware_calibration_dac_calibrate_button.setMaximumHeight(50)
 hardware_calibration_dac_calibrate_button.clicked.connect(dac_calibrate)
@@ -13853,9 +13959,15 @@ hardware_calibration_offset_hlayout.addLayout(hardware_calibration_offset_vlayou
 hardware_calibration_potential_offset = make_label_entry(hardware_calibration_offset_vlayout, "Pot. Offset")
 hardware_calibration_potential_offset.editingFinished.connect(offset_changed_callback)
 hardware_calibration_potential_offset.setText("0")
+hardware_calibration_potential_offset.setStyleSheet(
+	'QLineEdit[invalid="true"] {background: red;}'
+)
 hardware_calibration_current_offset = make_label_entry(hardware_calibration_offset_vlayout, "Curr. Offset")
 hardware_calibration_current_offset.editingFinished.connect(offset_changed_callback)
 hardware_calibration_current_offset.setText("0")
+hardware_calibration_current_offset.setStyleSheet(
+	'QLineEdit[invalid="true"] {background: red;}'
+)
 hardware_calibration_adc_measure_button = QtWidgets.QPushButton("Auto\nZero")
 hardware_calibration_adc_measure_button.setMaximumHeight(50)
 hardware_calibration_adc_measure_button.clicked.connect(zero_offset)
@@ -13864,9 +13976,12 @@ hardware_calibration_offset_hlayout.addWidget(hardware_calibration_adc_measure_b
 hardware_calibration_shunt_resistor_layout = QtWidgets.QHBoxLayout()
 hardware_calibration_box_layout.addLayout(hardware_calibration_shunt_resistor_layout)
 hardware_calibration_shuntvalues = [make_label_entry(hardware_calibration_shunt_resistor_layout, "R%d" % i) for i in range(1, 4)]
-for i in range(0,3):
+for i in range(0, 3):
 	hardware_calibration_shuntvalues[i].editingFinished.connect(shunt_calibration_changed_callback)
 	hardware_calibration_shuntvalues[i].setText("%.4f" % shunt_calibration[i])
+	hardware_calibration_shuntvalues[i].setStyleSheet(
+		'QLineEdit[invalid="true"] {background: red;}'
+	)
 
 hardware_calibration_button_layout = QtWidgets.QHBoxLayout()
 hardware_calibration_get_button = QtWidgets.QPushButton("Load from device")
@@ -14068,14 +14183,14 @@ class SoftwareGlobalsDialog(QtWidgets.QDialog):
 
 def open_software_globals_menu():
 	dialog = SoftwareGlobalsDialog(mainwidget)
-	dialog.exec_()
-
+	dialog.exec()
 
 def apply_tab_frame_width():
 	tab_frame_width = global_software_settings.get('tab_frame_width', 125)
 	font_metrics = QtGui.QFontMetrics(statustext.font())
 	char_width = font_metrics.horizontalAdvance(' ')
 	tab_frame.setFixedWidth(tab_frame_width * char_width)
+
 
 software_globals_menu_box = QtWidgets.QGroupBox(title="Software options", flat=False)
 format_box_for_parameter(software_globals_menu_box)
@@ -14316,7 +14431,7 @@ format_box_for_parameter_centered_title(cv_checking_box)
 cv_checking_layout = QtWidgets.QHBoxLayout()
 cv_checking_box.setLayout(cv_checking_layout)
 
-cv_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+cv_variables_checkbutton = GreenGUIButton("CHECK")
 cv_variables_checkbutton.clicked.connect(cv_checkbutton_callback)
 cv_checking_layout.addWidget(cv_variables_checkbutton)
 
@@ -14378,10 +14493,7 @@ cv_file_layout.addLayout(cv_file_choose_hlayout)
 cv_file_notes_entry = QtWidgets.QTextEdit()
 cv_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 cv_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -14735,7 +14847,7 @@ format_box_for_parameter_centered_title(lsv_checking_box)
 lsv_checking_layout = QtWidgets.QHBoxLayout()
 lsv_checking_box.setLayout(lsv_checking_layout)
 
-lsv_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+lsv_variables_checkbutton = GreenGUIButton("CHECK")
 lsv_variables_checkbutton.clicked.connect(lsv_checkbutton_callback)
 lsv_checking_layout.addWidget(lsv_variables_checkbutton)
 
@@ -14797,10 +14909,7 @@ lsv_file_layout.addLayout(lsv_file_choose_hlayout)
 lsv_file_notes_entry = QtWidgets.QTextEdit()
 lsv_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 lsv_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -15085,7 +15194,7 @@ format_box_for_parameter_centered_title(gcd_checking_box)
 gcd_checking_layout = QtWidgets.QHBoxLayout()
 gcd_checking_box.setLayout(gcd_checking_layout)
 
-gcd_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+gcd_variables_checkbutton = GreenGUIButton("CHECK")
 gcd_variables_checkbutton.clicked.connect(gcd_checkbutton_callback)
 gcd_checking_layout.addWidget(gcd_variables_checkbutton)
 
@@ -15111,7 +15220,7 @@ gcd_file_entry.setToolTip(
 )
 gcd_file_choose_button = QtWidgets.QPushButton("...")
 gcd_file_choose_button.setFixedWidth(32)
-gcd_file_choose_button.clicked.connect(lambda: choose_file(gcd_file_entry,"Choose where to save the charge/discharge measurement data"))
+gcd_file_choose_button.clicked.connect(lambda: choose_file(gcd_file_entry, "Choose where to save the charge/discharge measurement data"))
 
 gcd_file_choose_hlayout.addWidget(gcd_file_entry)
 gcd_file_choose_hlayout.addWidget(gcd_file_choose_button)
@@ -15121,10 +15230,7 @@ gcd_file_layout.addLayout(gcd_file_choose_hlayout)
 gcd_file_notes_entry = QtWidgets.QTextEdit()
 gcd_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 gcd_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -15295,7 +15401,7 @@ gcd_update_num_halfcycles_input_box.setLayout(gcd_update_num_halfcycles_input_la
 gcd_update_hlayout = QtWidgets.QHBoxLayout()
 gcd_update_num_halfcycles_input_label = QtWidgets.QLabel(text="No. of half cycles:")
 gcd_update_num_halfcycles_input_entry = QtWidgets.QLineEdit()
-gcd_update_num_halfcycles_input_button = QtWidgets.QPushButton("UPDATE")
+gcd_update_num_halfcycles_input_button = GreenGUIButton("UPDATE")
 gcd_update_num_halfcycles_input_button_timer = None
 gcd_update_num_halfcycles_input_button.clicked.connect(gcd_update_num_halfcycles_input)
 gcd_update_num_halfcycles_input_button.setEnabled(False)
@@ -15717,7 +15823,7 @@ format_box_for_parameter_centered_title(ca_checking_box)
 ca_checking_layout = QtWidgets.QHBoxLayout()
 ca_checking_box.setLayout(ca_checking_layout)
 
-ca_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+ca_variables_checkbutton = GreenGUIButton("CHECK")
 ca_variables_checkbutton.clicked.connect(ca_checkbutton_callback)
 ca_checking_layout.addWidget(ca_variables_checkbutton)
 
@@ -15729,17 +15835,16 @@ ca_vbox.addWidget(ca_checking_box)
 ca_range_box = QtWidgets.QGroupBox(title="Autoranging", flat=False)
 ca_range_box.setToolTip(
 	"<html><body>"
-	"Enable autoranging to automatically select the optimal current range<br>"
+	"Enable autoranging to automatically select the optimal current range "
 	"based on the measured current during the experiment.<br><br>"
-	"This feature allows the device to accurately measure currents across<br>"
-	"a wide dynamic range, from nanoamps up to 25 mA, by adapting to the<br>"
+	"This feature allows the device to accurately measure currents across "
+	"a wide dynamic range, from nanoamps up to 25 mA, by adapting to the "
 	"current level in real time.<br><br>"
-	"If specific current ranges are undesirable for these experiments,<br>"
+	"If specific current ranges are undesirable for these experiments, "
 	"untick their checkboxes to prevent them from being selected by autoranging.<br><br>"
-	"<b>NOTE:</b> Chronoamperometry experiments may experience difficulty<br>"
-	"stepping and holding at a fixed potential for measurement if multiple<br>"
-	"current ranges are selected. <b>This can impact the stability and<br>"
-	"quality of the recorded data.</b>"
+	"<b>NOTE:</b> Chronoamperometry experiment data may be adversely impacted by "
+	"cycling through current ranges in quick succession.<br>"
+	"<b>This can impact the stability and quality of the recorded data.</b>"
 	"</body></html>"
 )
 format_box_for_parameter(ca_range_box)
@@ -15752,7 +15857,7 @@ for curr in current_range_list:
 	ca_range_checkboxes.append(checkbox)
 	ca_range_layout.addWidget(checkbox)
 	checkbox.setChecked(False)  # Set checked to False as multiple can cause issues
-ca_range_checkboxes[0].setChecked(True)  # Check 20 mA as this gives best results for CA
+ca_range_checkboxes[0].setChecked(True)  # Check 20 mA
 
 ca_range_layout.setSpacing(50)
 ca_range_layout.setContentsMargins(3, 10, 3, 3)
@@ -15775,7 +15880,7 @@ ca_file_entry.setToolTip(
 )
 ca_file_choose_button = QtWidgets.QPushButton("...")
 ca_file_choose_button.setFixedWidth(32)
-ca_file_choose_button.clicked.connect(lambda: choose_file(ca_file_entry,"Choose where to save the chronoamperometry measurement data"))
+ca_file_choose_button.clicked.connect(lambda: choose_file(ca_file_entry, "Choose where to save the chronoamperometry measurement data"))
 ca_file_choose_hlayout.addWidget(ca_file_entry)
 ca_file_choose_hlayout.addWidget(ca_file_choose_button)
 ca_file_layout.addLayout(ca_file_choose_hlayout)
@@ -15784,10 +15889,7 @@ ca_file_layout.addLayout(ca_file_choose_hlayout)
 ca_file_notes_entry = QtWidgets.QTextEdit()
 ca_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 ca_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -16352,7 +16454,7 @@ format_box_for_parameter_centered_title(cp_checking_box)
 cp_checking_layout = QtWidgets.QHBoxLayout()
 cp_checking_box.setLayout(cp_checking_layout)
 
-cp_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+cp_variables_checkbutton = GreenGUIButton("CHECK")
 cp_variables_checkbutton.clicked.connect(cp_checkbutton_callback)
 cp_checking_layout.addWidget(cp_variables_checkbutton)
 
@@ -16377,7 +16479,7 @@ cp_file_entry.setToolTip(
 )
 cp_file_choose_button = QtWidgets.QPushButton("...")
 cp_file_choose_button.setFixedWidth(32)
-cp_file_choose_button.clicked.connect(lambda: choose_file(cp_file_entry,"Choose where to save the chronopotentiometry measurement data"))
+cp_file_choose_button.clicked.connect(lambda: choose_file(cp_file_entry, "Choose where to save the chronopotentiometry measurement data"))
 cp_file_choose_hlayout.addWidget(cp_file_entry)
 cp_file_choose_hlayout.addWidget(cp_file_choose_button)
 cp_file_layout.addLayout(cp_file_choose_hlayout)
@@ -16386,10 +16488,7 @@ cp_file_layout.addLayout(cp_file_choose_hlayout)
 cp_file_notes_entry = QtWidgets.QTextEdit()
 cp_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 cp_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -16741,7 +16840,7 @@ format_box_for_parameter_centered_title(sd_checking_box)
 sd_checking_layout = QtWidgets.QHBoxLayout()
 sd_checking_box.setLayout(sd_checking_layout)
 
-sd_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+sd_variables_checkbutton = GreenGUIButton("CHECK")
 sd_variables_checkbutton.clicked.connect(sd_checkbutton_callback)
 sd_checking_layout.addWidget(sd_variables_checkbutton)
 
@@ -16766,7 +16865,7 @@ sd_file_entry.setToolTip(
 )
 sd_file_choose_button = QtWidgets.QPushButton("...")
 sd_file_choose_button.setFixedWidth(32)
-sd_file_choose_button.clicked.connect(lambda: choose_file(sd_file_entry,"Choose where to save the self-discharge measurement data"))
+sd_file_choose_button.clicked.connect(lambda: choose_file(sd_file_entry, "Choose where to save the self-discharge measurement data"))
 sd_file_choose_hlayout.addWidget(sd_file_entry)
 sd_file_choose_hlayout.addWidget(sd_file_choose_button)
 sd_file_layout.addLayout(sd_file_choose_hlayout)
@@ -16775,10 +16874,7 @@ sd_file_layout.addLayout(sd_file_choose_hlayout)
 sd_file_notes_entry = QtWidgets.QTextEdit()
 sd_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 sd_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -17176,7 +17272,7 @@ format_box_for_parameter_centered_title(rate_checking_box)
 rate_checking_layout = QtWidgets.QHBoxLayout()
 rate_checking_box.setLayout(rate_checking_layout)
 
-rate_variables_checkbutton = QtWidgets.QPushButton("CHECK")
+rate_variables_checkbutton = GreenGUIButton("CHECK")
 rate_variables_checkbutton.clicked.connect(rate_checkbutton_callback)
 rate_checking_layout.addWidget(rate_variables_checkbutton)
 
@@ -17205,7 +17301,7 @@ rate_file_entry.setToolTip(
 )
 rate_file_choose_button = QtWidgets.QPushButton("...")
 rate_file_choose_button.setFixedWidth(32)
-rate_file_choose_button.clicked.connect(lambda: choose_file(rate_file_entry,"Choose where to save the rate-testing measurement data"))
+rate_file_choose_button.clicked.connect(lambda: choose_file(rate_file_entry, "Choose where to save the rate-testing measurement data"))
 
 rate_file_choose_hlayout.addWidget(rate_file_entry)
 rate_file_choose_hlayout.addWidget(rate_file_choose_button)
@@ -17215,10 +17311,7 @@ rate_file_layout.addLayout(rate_file_choose_hlayout)
 rate_file_notes_entry = QtWidgets.QTextEdit()
 rate_file_notes_entry.setPlaceholderText("*** Optional experiment notes to write in summary file ***")
 rate_file_notes_entry.setStyleSheet("""
-	QTextEdit {
-		color: black;
-	}
-	QTextEdit: empty {
+	QTextEdit:empty {
 		color:grey;
 	}
 """)
@@ -17397,7 +17490,7 @@ plotter_file_choose_hlayout = QtWidgets.QHBoxLayout()
 plotter_file_entry = QtWidgets.QLineEdit()
 plotter_file_choose_button = QtWidgets.QPushButton("...")
 plotter_file_choose_button.setFixedWidth(32)
-plotter_file_choose_button.clicked.connect(lambda: choose_file(plotter_file_entry,"Choose the summary file to load data from"))
+plotter_file_choose_button.clicked.connect(lambda: choose_plot_data_file(plotter_file_entry, "Choose the summary file to load data from"))
 plotter_file_choose_hlayout.addWidget(plotter_file_entry)
 plotter_file_choose_hlayout.addWidget(plotter_file_choose_button)
 plotter_file_layout.addLayout(plotter_file_choose_hlayout)
@@ -19145,7 +19238,7 @@ class Plotter_DropdownArea(QtWidgets.QWidget):
 		layout.addWidget(toolbar)
 
 		# Show the pop-up
-		popup.exec_()
+		popup.exec()
 
 	def toggleDropdown(self):
 		if self.dropdown_frame.isHidden():
@@ -19217,7 +19310,6 @@ plotter_layout.setContentsMargins(0, 0, 0, 0)
 plotter_layout.addWidget(plotter_scroll_area)
 tabs[8].setLayout(plotter_layout)
 
-
 hbox = QtWidgets.QHBoxLayout()
 hbox.addLayout(display_plot_frame)
 hbox.addWidget(tab_frame)
@@ -19225,7 +19317,6 @@ hbox.addWidget(tab_frame)
 vbox = QtWidgets.QVBoxLayout()
 statustext = QtWidgets.QPlainTextEdit()
 statustext.setFixedHeight(90)
-apply_tab_frame_width()
 vbox.addLayout(hbox)
 vbox.addWidget(statustext)
 
@@ -19233,6 +19324,14 @@ mainwidget = QtWidgets.QWidget()
 win.setCentralWidget(mainwidget)
 vbox.setContentsMargins(0, 0, 0, 0)
 mainwidget.setLayout(vbox)
+
+# Automatically set tab frame width according to display
+tab_frame_min_width_pixels = tab_frame.sizeHint().width()
+font_metrics = QtGui.QFontMetrics(statustext.font())
+char_width = font_metrics.horizontalAdvance(' ')
+tab_frame_min_width_chars = int(round((tab_frame_min_width_pixels / char_width) * 0.90))
+global_software_settings['tab_frame_width'] = tab_frame_min_width_chars
+apply_tab_frame_width()
 
 
 def periodic_update():  # A state machine is used to determine which functions need to be called, depending on the current state of the program
@@ -19348,5 +19447,6 @@ timer.start(int(qt_timer_period))  # Calls periodic_update() every adcread_inter
 log_message("Program started. Press the \"Connect\" button in the hardware tab to connect to the USB interface.")
 log_message("Default software parameters loaded. Press the \"Global parameters\" button in the hardware tab to modify them.")
 
-win.show()  # Show the main window
-sys.exit(app.exec_())  # Keep the program running by periodically calling the periodic_update() until the GUI window is closed
+def main():
+	win.show()  # Show the main window
+	sys.exit(app.exec())  # Keep the program running by periodically calling the periodic_update() until the GUI window is closed
