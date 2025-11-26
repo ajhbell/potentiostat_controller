@@ -33,7 +33,7 @@ import toml
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6 import QtWidgets
-from potentiostat_controller import potentiostat_controller_v1 as ctrl
+from potentiostat_controller import potentiostat_controller_v2 as ctrl
 
 TAB_INDEX = {
     "CV": 1,
