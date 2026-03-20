@@ -19430,7 +19430,7 @@ cp_delay_timer = QtCore.QTimer()
 cp_delay_timer.setSingleShot(True)
 cp_delay_timer.timeout.connect(lambda: cp_start(cp_current_segment_index))
 
-"SD TIMER"
+"""SD TIMER"""
 sd_delay_timer = QtCore.QTimer()
 sd_delay_timer.setSingleShot(True)
 sd_delay_timer.timeout.connect(lambda: sd_start(sd_current_segment_index))
